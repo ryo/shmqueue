@@ -18,13 +18,12 @@ void __cpu_simple_lock_try(__cpu_simple_lock_t *);
 struct keyvalue {
 	uint32_t kv_keysize;	/* including '\0' */
 	uint32_t kv_storagesize;
-	uint8_t kv_data[2000];	/* XXX: "<key>\0<storage>" */
+	uint8_t kv_data[2000];	/* XXX: "<key)>\0<storage>" */
 #define KEYVALUE_KEY(keyvalue)		((keyvalue)->kv_data)
 #define KEYVALUE_STORAGE(keyvalue)	((keyvalue)->kv_data + (keyvalue)->kv_keysize)
 };
 
-#define SHMQUEUE_KEYVALUE_TOTALSIZE	(sizeof(struct shmqueue_item) - offsetof(struct shmqueue_item, shi_keyvalue))
-#define SHMQUEUE_KEYVALUE_DATASIZE	(SHMQUEUE_KEYVALUE_TOTALSIZE - offsetof(struct keyvalue, kv_data))
+#define SHMQUEUE_KEYVALUE_DATASIZE	(sizeof(struct keyvalue) - offsetof(struct keyvalue, kv_data))
 
 
 
