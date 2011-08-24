@@ -52,9 +52,10 @@ void
 shmqueue_dumpitem(struct shmqueue_item *item)
 {
 	printf("      shi_hashidx=%d\n", item->shi_hashidx);
-	printf("      shi_keyvalue.key=<%s>\n", item->shi_keyvalue.kv_key);
+	printf("      shi_keyvalue.keysize=<%d>\n", item->shi_keyvalue.kv_keysize);
 	printf("      shi_keyvalue.storagesize=%u\n", item->shi_keyvalue.kv_storagesize);
-	printf("      shi_keyvalue.storage=<%s>\n", item->shi_keyvalue.kv_storage);
+	printf("      shi_keyvalue.key(%p)=<%s>\n", KEYVALUE_KEY(&item->shi_keyvalue), KEYVALUE_KEY(&item->shi_keyvalue));
+	printf("      shi_keyvalue.storage(%p)=<%s>\n", KEYVALUE_STORAGE(&item->shi_keyvalue), KEYVALUE_STORAGE(&item->shi_keyvalue));
 }
 
 void
@@ -211,6 +212,13 @@ shmqueue_create(struct shmqueue *shmq_header, void *mem, size_t size)
 
 	header->sha_memsize = size;
 	header->sha_itemsize = sizeof(struct shmqueue_item);
+
+	if (sizeof(struct shmqueue_item) > SHMQUEUE_ITEMSIZE) {
+		fprintf(stderr, "panic: sizeof(struct shmqueue_item) too large\n");
+		exit(99);
+	}
+
+
 	header->sha_itemnum = freespace / sizeof(struct shmqueue_item);
 	header->sha_pool = itempool;
 
@@ -248,6 +256,7 @@ shmqueue_create(struct shmqueue *shmq_header, void *mem, size_t size)
 
 	shmq_header->header = header;
 	shmq_header->hash_callback = shmqueue_hash_string;
+
 	shmqueue_lockinit(shmq_header);
 
 	return 0;
@@ -283,7 +292,9 @@ shmqueue_remove_from_freelist(struct shmqueue *shmq_header)
 	shmqueue_unlock(shmq_header);
 
 	item->shi_hashidx = 0;
+	item->shi_keyvalue.kv_keysize = 1;
 	item->shi_keyvalue.kv_storagesize = 0;
+	item->shi_keyvalue.kv_data[0] = '\0';
 
 	return item;
 }
@@ -376,7 +387,7 @@ shmqueue_keyvalue_peek(struct shmqueue *shmq_header, uint8_t *key)
 	    item != NULL;
 	    item = RTAILQ_NEXT(item, &header->sha_hashlist[hashidx], shmqueue_item, shi_hashlist)) {
 
-		if (SHMQUEUE_STRCMP(item->shi_keyvalue.kv_key, key) == 0) {
+		if (SHMQUEUE_STRCMP(KEYVALUE_KEY(&item->shi_keyvalue), key) == 0) {
 			/* found! */
 
 			/*
@@ -411,7 +422,7 @@ shmqueue_keyvalue_fetch(struct shmqueue *shmq_header, uint8_t *key, struct keyva
 	    item != NULL;
 	    item = RTAILQ_NEXT(item, &header->sha_hashlist[hashidx], shmqueue_item, shi_hashlist)) {
 
-		if (SHMQUEUE_STRCMP(item->shi_keyvalue.kv_key, key) == 0) {
+		if (SHMQUEUE_STRCMP(KEYVALUE_KEY(&item->shi_keyvalue), key) == 0) {
 			/* found! */
 
 			/*
@@ -424,9 +435,10 @@ shmqueue_keyvalue_fetch(struct shmqueue *shmq_header, uint8_t *key, struct keyva
 			    item, shmqueue_item, shi_list);
 
 			/* copy to caller */
+			keyvalue->kv_keysize = item->shi_keyvalue.kv_keysize;
 			keyvalue->kv_storagesize = item->shi_keyvalue.kv_storagesize;
-			SHMQUEUE_STRCPY(keyvalue->kv_key, item->shi_keyvalue.kv_key);
-			memcpy(keyvalue->kv_storage, item->shi_keyvalue.kv_storage, keyvalue->kv_storagesize);
+			memcpy(keyvalue->kv_data, item->shi_keyvalue.kv_data, keyvalue->kv_keysize + keyvalue->kv_storagesize);
+			KEYVALUE_STORAGE(keyvalue)[keyvalue->kv_storagesize] = '\0';
 
 			shmqueue_unlock(shmq_header);
 			return keyvalue;
@@ -442,10 +454,12 @@ shmqueue_keyvalue_store(struct shmqueue *shmq_header, uint8_t *key, uint8_t *sto
 	struct shmqueue_header *header;
 	struct shmqueue_item *item;
 	uint32_t hashidx;
+	int keylen;
 
 	header = shmq_header->header;
 
-	if (storage_size >= SHMQUEUE_ITEM_STORAGESIZE)
+	keylen = strlen((char *)key) + 1;
+	if (storage_size + keylen >= SHMQUEUE_KEYVALUE_DATASIZE)
 		return -1;
 
 	hashidx = shmq_header->hash_callback(key) % header->sha_hashnum;
@@ -455,7 +469,7 @@ shmqueue_keyvalue_store(struct shmqueue *shmq_header, uint8_t *key, uint8_t *sto
 	    item != NULL;
 	    item = RTAILQ_NEXT(item, &header->sha_hashlist[hashidx], shmqueue_item, shi_hashlist)) {
 
-		if (SHMQUEUE_STRCMP(item->shi_keyvalue.kv_key, key) == 0) {
+		if (SHMQUEUE_STRCMP(KEYVALUE_KEY(&item->shi_keyvalue), key) == 0) {
 			/* already exists! */
 
 			/*
@@ -469,8 +483,8 @@ shmqueue_keyvalue_store(struct shmqueue *shmq_header, uint8_t *key, uint8_t *sto
 
 			/* copy from caller */
 			item->shi_keyvalue.kv_storagesize = storage_size;
-			SHMQUEUE_STRCPY(item->shi_keyvalue.kv_key, key);
-			memcpy(item->shi_keyvalue.kv_storage, storage, storage_size);
+			memcpy(KEYVALUE_STORAGE(&item->shi_keyvalue), storage, storage_size);
+			KEYVALUE_STORAGE(&item->shi_keyvalue)[storage_size] = '\0';
 
 			shmqueue_unlock(shmq_header);
 			return 0;
@@ -486,10 +500,11 @@ shmqueue_keyvalue_store(struct shmqueue *shmq_header, uint8_t *key, uint8_t *sto
 		return -1;
 
 	/* update data, and store */
-	strcpy((char *)item->shi_keyvalue.kv_key, (char *)key);
+	SHMQUEUE_STRCPY(KEYVALUE_KEY(&item->shi_keyvalue), key);
+	item->shi_keyvalue.kv_keysize = keylen;
 	item->shi_keyvalue.kv_storagesize = storage_size;
-	memcpy(item->shi_keyvalue.kv_storage, storage, storage_size);
-	item->shi_keyvalue.kv_storage[storage_size] = '\0';
+	memcpy(KEYVALUE_STORAGE(&item->shi_keyvalue), storage, storage_size);
+	KEYVALUE_STORAGE(&item->shi_keyvalue)[storage_size] = '\0';
 
 	shmqueue_add_to_lru(shmq_header, item, hashidx);
 
@@ -511,7 +526,7 @@ shmqueue_keyvalue_delete(struct shmqueue *shmq_header, uint8_t *key)
 	    item != NULL;
 	    item = RTAILQ_NEXT(item, &header->sha_hashlist[hashidx], shmqueue_item, shi_hashlist)) {
 
-		if (SHMQUEUE_STRCMP(item->shi_keyvalue.kv_key, key) == 0) {
+		if (SHMQUEUE_STRCMP(KEYVALUE_KEY(&item->shi_keyvalue), key) == 0) {
 			/* found! */
 
 			/* remove from LRU list */
@@ -574,10 +589,11 @@ shmqueue_getoldest(struct shmqueue *shmq_header, struct keyvalue *keyvalue)
 	if (item == NULL)
 		return -1;
 
+	keyvalue->kv_keysize = item->shi_keyvalue.kv_keysize;
 	keyvalue->kv_storagesize = item->shi_keyvalue.kv_storagesize;
-	SHMQUEUE_STRCPY(keyvalue->kv_key, item->shi_keyvalue.kv_key);
-	memcpy(keyvalue->kv_storage, item->shi_keyvalue.kv_storage, keyvalue->kv_storagesize);
-	keyvalue->kv_storage[keyvalue->kv_storagesize] = '\0';
+
+	memcpy(keyvalue->kv_data, item->shi_keyvalue.kv_data, keyvalue->kv_keysize + keyvalue->kv_storagesize);
+	KEYVALUE_STORAGE(keyvalue)[keyvalue->kv_storagesize] = '\0';
 
 	shmqueue_add_to_freelist(shmq_header, item);
 
