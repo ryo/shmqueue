@@ -1,12 +1,12 @@
 #ifndef _SHMQUEUE_H_
 #define _SHMQUEUE_H_
 
+#include <stddef.h>
 #include "rtailq.h"
 
 #define DEBUGTRACE	printf("%s:%d\n", __func__, __LINE__)
 
-#define SHMQUEUE_ITEM_STORAGESIZE	1700	/* maximum storage size of item */
-#define SHMQUEUE_ITEM_KEYSIZE		256	/* keyvalue key size (complete key size) */
+#define SHMQUEUE_ITEMSIZE		2048
 #define SHMQUEUE_HASHNUM		199999	/* must be prime number! */
 
 typedef volatile unsigned char	__cpu_simple_lock_t;
@@ -16,28 +16,52 @@ void __cpu_simple_unlock(__cpu_simple_lock_t *);
 void __cpu_simple_lock_try(__cpu_simple_lock_t *);
 
 struct keyvalue {
+	uint32_t kv_keysize;	/* including '\0' */
 	uint32_t kv_storagesize;
-	uint8_t kv_key[SHMQUEUE_ITEM_KEYSIZE];
-	uint8_t kv_storage[SHMQUEUE_ITEM_STORAGESIZE];
+	uint8_t kv_data[2000];	/* XXX: "<key>\0<storage>" */
+#define KEYVALUE_KEY(keyvalue)		((keyvalue)->kv_data)
+#define KEYVALUE_STORAGE(keyvalue)	((keyvalue)->kv_data + (keyvalue)->kv_keysize)
 };
 
+#define SHMQUEUE_KEYVALUE_TOTALSIZE	(sizeof(struct shmqueue_item) - offsetof(struct shmqueue_item, shi_keyvalue))
+#define SHMQUEUE_KEYVALUE_DATASIZE	(SHMQUEUE_KEYVALUE_TOTALSIZE - offsetof(struct keyvalue, kv_data))
+
+
+
+#undef SHMQUEUE_BUCKET_HACK	/* XXX: notyet */
 
 struct shmqueue_item {
 	union {
 		struct {
+#ifdef SHMQUEUE_BUCKET_HACK
+			int shi_bucketidx;
+#endif
 			RTAILQ_ENTRY(shmqueue_item) shi_list;		/* in sha_lrulist or sha_freelist */
 			RTAILQ_ENTRY(shmqueue_item) shi_hashlist;	/* in sha_hashlist[myhash] */
 			uint32_t shi_hashidx;
-
 			/* userarea */
 			struct keyvalue shi_keyvalue;
 		};
-		char xxx[2048];	/* XXX: for alignment */
+		char stub[SHMQUEUE_ITEMSIZE];
 	};
 };
 
+
+
+#ifdef SHMQUEUE_BUCKET_HACK
+#define SHMQUEUE_NBUCKET	4
+#define SHMQUEUE_BUCKET0_SIZE	128
+#define SHMQUEUE_BUCKET1_SIZE	512
+#define SHMQUEUE_BUCKET2_SIZE	1024
+#define SHMQUEUE_BUCKET3_SIZE	2048
+#endif
+
 struct shmqueue_header {
+#ifdef SHMQUEUE_BUCKET_HACK
+	RTAILQ_HEAD(sha_freelists) sha_freelists[SHMQUEUE_NBUCKET];
+#else
 	RTAILQ_HEAD(sha_freelist) sha_freelist;
+#endif
 	RTAILQ_HEAD(sha_lrulist) sha_lrulist;
 	size_t sha_memsize;
 	unsigned int sha_itemsize;
