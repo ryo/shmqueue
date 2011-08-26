@@ -117,6 +117,67 @@ shmqueue_dumpall(struct shmqueue *shmq_header)
 	}
 }
 
+static void
+dumpdata(uint8_t *p, uint32_t len)
+{
+	uint8_t c;
+	printf("%u\t\"", len);
+
+	for (; len > 0; len--) {
+		c = *p++;
+		if ((c < 0x20) || (c >= 0x7f) || (c == '"') || (c == '\'') ||
+		    (c == '$') || (c == '%') || (c == '\\')) {
+
+			printf("\\x%02x", c);
+		} else {
+			printf("%c", c);
+		}
+	}
+
+	printf("\"");
+}
+
+void
+shmqueue_dump_tsv(struct shmqueue *shmq_header)
+{
+	struct shmqueue_header *header;
+	struct shmqueue_item *item;
+
+	header = shmq_header->header;
+
+	for (item = RTAILQ_FIRST(&header->sha_lrulist, shmqueue_item);
+	    item != NULL;
+	    item = RTAILQ_NEXT(item, &header->sha_lrulist, shmqueue_item, shi_list)) {
+
+		printf("%s\t", KEYVALUE_KEY(&item->shi_keyvalue));
+		dumpdata(KEYVALUE_STORAGE(&item->shi_keyvalue), item->shi_keyvalue.kv_storagesize);
+		printf("\n");
+	}
+}
+
+void
+shmqueue_dump_statistics(struct shmqueue *shmq_header)
+{
+	int i;
+
+	for (i = 0; i < SHMQUEUE_NBUCKET; i++)
+		printf("store (new)   success (bucket=%d): %llu\n", i, shmq_header->header->sha_stat.ss_store_new_success[i]);
+
+	for (i = 0; i < SHMQUEUE_NBUCKET; i++)
+		printf("store (reuse) success (bucket=%d): %llu\n", i, shmq_header->header->sha_stat.ss_store_reuse_success[i]);
+
+	for (i = 0; i < SHMQUEUE_NBUCKET; i++)
+		printf("store failure         (bucket=%d): %llu\n", i, shmq_header->header->sha_stat.ss_store_failure[i]);
+
+	for (i = 0; i < SHMQUEUE_NBUCKET; i++)
+		printf("fetch (peek) success  (bucket=%d): %llu\n", i, shmq_header->header->sha_stat.ss_fetch_success[i]);
+
+	printf("fetch (peek) failure  (bucket=%d): %llu\n", i, shmq_header->header->sha_stat.ss_fetch_failure);
+}
+
+
+
+
 /* constructor */
 struct shmqueue *
 shmqueue_new(int shmid, size_t size, int reuse, int verbose)
@@ -186,7 +247,6 @@ shmqueue_create(struct shmqueue *shmq_header, void *mem, size_t size)
 	void *memend;
 	struct shmqueue_item *itempool;
 	size_t headersize, freespace;
-	int i;
 
 	memend = (char *)mem + size;
 
@@ -218,9 +278,15 @@ shmqueue_create(struct shmqueue *shmq_header, void *mem, size_t size)
 		exit(99);
 	}
 
-
 	header->sha_itemnum = freespace / sizeof(struct shmqueue_item);
 	header->sha_pool = itempool;
+
+	shmq_header->header = header;
+	shmq_header->hash_callback = shmqueue_hash_string;
+
+	shmqueue_lockinit(shmq_header);
+
+	shmqueue_init(header);
 
 	printf("=============================================\n");
 	printf("sizeof header = %d\n", (int)sizeof(struct shmqueue_header));
@@ -238,6 +304,13 @@ shmqueue_create(struct shmqueue *shmq_header, void *mem, size_t size)
 	printf("header->sha_pool    = %p\n", header->sha_pool);
 	printf("=============================================\n");
 
+	return 0;
+}
+
+void
+shmqueue_init(struct shmqueue_header *header)
+{
+	int i;
 
 	/* init queue headers */
 	RTAILQ_INIT(&header->sha_freelist);
@@ -246,21 +319,14 @@ shmqueue_create(struct shmqueue *shmq_header, void *mem, size_t size)
 	for (i = 0; i < header->sha_hashnum; i++)
 		RTAILQ_INIT(&header->sha_hashlist[i]);
 
-
 	/* insert all itempool to freelist */
 	header->sha_item_inuse = 0;
 	for (i = 0; i < header->sha_itemnum; i++) {
 		RTAILQ_INSERT_TAIL(&header->sha_freelist,
-		    &itempool[i], shmqueue_item, shi_list);
+		    &header->sha_pool[i], shmqueue_item, shi_list);
 	}
-
-	shmq_header->header = header;
-	shmq_header->hash_callback = shmqueue_hash_string;
-
-	shmqueue_lockinit(shmq_header);
-
-	return 0;
 }
+
 
 void
 shmqueue_setcallback(struct shmqueue *shmq_header, uint32_t (*hash_callback)(uint8_t *))
@@ -399,10 +465,17 @@ shmqueue_keyvalue_peek(struct shmqueue *shmq_header, uint8_t *key)
 			RTAILQ_INSERT_HEAD(&header->sha_lrulist,
 			    item, shmqueue_item, shi_list);
 
+			/* update statistics */
+			header->sha_stat.ss_fetch_success[SIZE2BUCKET(item->shi_keyvalue.kv_storagesize)]++;
+
 			shmqueue_unlock(shmq_header);
 			return &item->shi_keyvalue;
 		}
 	}
+
+	/* update statistics */
+	header->sha_stat.ss_fetch_failure++;
+
 	shmqueue_unlock(shmq_header);
 	return NULL;
 }
@@ -440,10 +513,17 @@ shmqueue_keyvalue_fetch(struct shmqueue *shmq_header, uint8_t *key, struct keyva
 			memcpy(keyvalue->kv_data, item->shi_keyvalue.kv_data, keyvalue->kv_keysize + keyvalue->kv_storagesize);
 			KEYVALUE_STORAGE(keyvalue)[keyvalue->kv_storagesize] = '\0';
 
+			/* update statistics */
+			header->sha_stat.ss_fetch_success[SIZE2BUCKET(keyvalue->kv_storagesize)]++;
+
 			shmqueue_unlock(shmq_header);
 			return keyvalue;
 		}
 	}
+
+	/* update statistics */
+	header->sha_stat.ss_fetch_failure++;
+
 	shmqueue_unlock(shmq_header);
 	return NULL;
 }
@@ -459,8 +539,14 @@ shmqueue_keyvalue_store(struct shmqueue *shmq_header, uint8_t *key, uint8_t *sto
 	header = shmq_header->header;
 
 	keylen = strlen((char *)key) + 1;
-	if (storage_size + keylen >= SHMQUEUE_KEYVALUE_DATASIZE)
+	if (storage_size + keylen >= SHMQUEUE_KEYVALUE_DATASIZE) {
+		/* update statistics */
+		shmqueue_lock(shmq_header);
+		header->sha_stat.ss_store_failure[SIZE2BUCKET(storage_size)]++;
+		shmqueue_unlock(shmq_header);
+
 		return -1;
+	}
 
 	hashidx = shmq_header->hash_callback(key) % header->sha_hashnum;
 
@@ -486,6 +572,9 @@ shmqueue_keyvalue_store(struct shmqueue *shmq_header, uint8_t *key, uint8_t *sto
 			memcpy(KEYVALUE_STORAGE(&item->shi_keyvalue), storage, storage_size);
 			KEYVALUE_STORAGE(&item->shi_keyvalue)[storage_size] = '\0';
 
+			/* update statistics */
+			header->sha_stat.ss_store_reuse_success[SIZE2BUCKET(storage_size)]++;
+
 			shmqueue_unlock(shmq_header);
 			return 0;
 		}
@@ -496,8 +585,14 @@ shmqueue_keyvalue_store(struct shmqueue *shmq_header, uint8_t *key, uint8_t *sto
 
 	/* allocate pool */
 	item = shmqueue_remove_from_freelist(shmq_header);
-	if (item == NULL)
+	if (item == NULL) {
+		/* update statistics */
+		shmqueue_lock(shmq_header);
+		header->sha_stat.ss_store_failure[SIZE2BUCKET(storage_size)]++;
+		shmqueue_unlock(shmq_header);
+
 		return -1;
+	}
 
 	/* update data, and store */
 	SHMQUEUE_STRCPY(KEYVALUE_KEY(&item->shi_keyvalue), key);
@@ -507,6 +602,11 @@ shmqueue_keyvalue_store(struct shmqueue *shmq_header, uint8_t *key, uint8_t *sto
 	KEYVALUE_STORAGE(&item->shi_keyvalue)[storage_size] = '\0';
 
 	shmqueue_add_to_lru(shmq_header, item, hashidx);
+
+	/* update statistics */
+	shmqueue_lock(shmq_header);
+	header->sha_stat.ss_store_new_success[SIZE2BUCKET(storage_size)]++;
+	shmqueue_unlock(shmq_header);
 
 	return 0;
 }

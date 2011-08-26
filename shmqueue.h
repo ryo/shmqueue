@@ -45,15 +45,33 @@ struct shmqueue_item {
 	};
 };
 
-
-
-#ifdef SHMQUEUE_BUCKET_HACK
-#define SHMQUEUE_NBUCKET	4
+#define SHMQUEUE_NBUCKET	8
 #define SHMQUEUE_BUCKET0_SIZE	128
-#define SHMQUEUE_BUCKET1_SIZE	512
-#define SHMQUEUE_BUCKET2_SIZE	1024
-#define SHMQUEUE_BUCKET3_SIZE	2048
-#endif
+#define SHMQUEUE_BUCKET1_SIZE	256
+#define SHMQUEUE_BUCKET2_SIZE	512
+#define SHMQUEUE_BUCKET3_SIZE	1024
+#define SHMQUEUE_BUCKET4_SIZE	(1024 * 2)
+#define SHMQUEUE_BUCKET5_SIZE	(1024 * 4)
+#define SHMQUEUE_BUCKET6_SIZE	(1024 * 16)
+#define SHMQUEUE_BUCKET7_SIZE	(1024 * 32)
+#define SHMQUEUE_BUCKET_MAXSIZE	SHMQUEUE_BUCKET7_SIZE
+
+#define SIZE2BUCKET(s)						\
+	(((s) < SHMQUEUE_BUCKET3_SIZE) ?			\
+		(((s) < SHMQUEUE_BUCKET1_SIZE) ?		\
+			(((s) < SHMQUEUE_BUCKET0_SIZE) ?	\
+				0 : 1)				\
+			:					\
+			(((s) < SHMQUEUE_BUCKET2_SIZE) ?	\
+				2 : 3))				\
+		:						\
+		(((s) < SHMQUEUE_BUCKET5_SIZE) ?		\
+			(((s) < SHMQUEUE_BUCKET4_SIZE) ?	\
+				4 : 5)				\
+			:					\
+			(((s) < SHMQUEUE_BUCKET6_SIZE) ?	\
+				6 : 7)))
+
 
 struct shmqueue_header {
 #ifdef SHMQUEUE_BUCKET_HACK
@@ -63,11 +81,21 @@ struct shmqueue_header {
 #endif
 	RTAILQ_HEAD(sha_lrulist) sha_lrulist;
 	size_t sha_memsize;
+	unsigned int sha_hashnum;
 	unsigned int sha_itemsize;
 	unsigned int sha_itemnum;
 	unsigned int sha_item_inuse;
-	unsigned int sha_hashnum;
 	struct shmqueue_item *sha_pool;
+
+	/* statistics */
+	struct {
+		uint64_t ss_store_new_success[SHMQUEUE_NBUCKET];
+		uint64_t ss_store_reuse_success[SHMQUEUE_NBUCKET];
+		uint64_t ss_store_failure[SHMQUEUE_NBUCKET];
+		uint64_t ss_fetch_success[SHMQUEUE_NBUCKET];
+		uint64_t ss_fetch_failure;
+	} sha_stat;
+
 	__cpu_simple_lock_t shmqueue_cpulock;
 	RTAILQ_HEAD(sha_hashlist) sha_hashlist[];
 };
@@ -90,6 +118,7 @@ struct shmqueue {
 struct shmqueue *shmqueue_new(int, size_t, int, int);
 
 /* initialize */
+void shmqueue_init(struct shmqueue_header *);
 int shmqueue_create(struct shmqueue *, void *, size_t);
 int shmqueue_attach(struct shmqueue *, void *);
 void shmqueue_setcallback(struct shmqueue *, uint32_t (*)(uint8_t *));
@@ -118,6 +147,8 @@ int shmqueue_keyvalue_delete(struct shmqueue *, uint8_t *);
 void shmqueue_dumpitem(struct shmqueue_item *);
 void shmqueue_dump(struct shmqueue *);
 void shmqueue_dumpall(struct shmqueue *);
+void shmqueue_dump_tsv(struct shmqueue *);
+void shmqueue_dump_statistics(struct shmqueue *);
 
 
 #endif /* _SHMQUEUE_H_ */
